@@ -1,0 +1,516 @@
+---
+title: "Machine Learning para prever salário de cientistas de dados"
+subtitle: "Utilizando base de dados fornecida por DataHackers"
+author: "Fellipe Gomes"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, error = F, message = F)
+
+library(tidyverse)
+library(DataExplorer)
+library(knitr)
+library(kableExtra)
+library(caret)
+library(patchwork)
+library(GGally)
+
+theme_set(theme_bw())
+
+kable2 <- function(x, width = "100%"){
+  kable(x) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive", "bordered"),
+                full_width = F) %>%
+  scroll_box(width = width, height = "300px")
+}
+# devtools::install("../input/r-visdat-package/visdat/", dependencies = F)
+```
+
+Autor do projeto:
+
+* [Fellipe Gomes](https://github.com/gomesfellipe) (Estatístico/Cientista de Dados)
+
+<p align="right"><span style="color:firebrick">Se você gostou do Kernel não esqueça do upvote! <i class="fas fa-hand-peace"></i></span> </p>
+
+Carregar dependencias:
+
+```{r, eval=F}
+library(tidyverse)
+library(DataExplorer)
+library(knitr)
+library(kableExtra)
+library(caret)
+library(patchwork)
+
+theme_set(theme_bw())
+
+kable2 <- function(x, width = "100%"){
+  kable(x) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive", "bordered"),
+                full_width = F) %>%
+  scroll_box(width = width, height = "300px")
+}
+```
+
+
+
+# Definica do Problema
+
+A partir dos dados disponibilizados pela comunidade [DataHackers](https://datahackers.com.br/) é possivel aplicar diferentes abordagens. 
+
+![](https://scontent.fsdu5-1.fna.fbcdn.net/v/t1.0-9/26992067_1974330222888513_6840516591529613687_n.png?_nc_cat=107&_nc_sid=e3f864&_nc_eui2=AeERmLhfHJDyN2d2G_IzzOrVVGAlX10_A7dUYCVfXT8Dtw5ESbyKCpHtShewYDSWNPs&_nc_oc=AQlaJ1zz4Le5hXwzccPt3-3RHOImzWCMKwv4Px95n2dT88qnkGYQlKi11PDSswYWpRs&_nc_ht=scontent.fsdu5-1.fna&oh=00dca4eb6f1299a9365164424584db31&oe=5EE0D98D){width=80%} </br>
+<small>fonte: <https://www.facebook.com/datahackersoficial/about/></small>
+
+Neste caso vamos construir um modelo para prever o salário de um cientista de dados dado um conjunto de respostas
+
+## Descricao do problema
+
+Considerando que as pessoas que responderam o questionario sao cientistas de dados, vamos utilizar estes dados para estimar qual seria o salário e um cientista de dados baseado em algumas perguntas do questionario. Nossa variável resposta será:
+
+Y = salário de um cientista de dados
+
+## Por que um modelo para prever salários?
+
+Imagine que um departamento de RH esteja interessado em conhecer o valor de mercado de um cientista de dados, ou ainda que deseje saber quais as skills mais importantes para contratação. Um modelo de Machine Learning pode ajudar a refletir sobre essas questões
+
+## Dados Fornecidos
+
+Leitura dos dados e arrumar nomes de colunas
+
+```{r}
+# read dataset
+dataset <- read_csv("datahackers-survey-2019-anonymous-responses.csv")
+
+# fix colnames
+dataset <- 
+  dataset %>% 
+  janitor::clean_names()
+```
+
+Algumas restrições impostas aos dados:
+
+  * pesquisa foi conduzida de forma online durante o mês de Novembro de 2019
+  * dataset foi anonimizado
+  * remover alguns outliers que poderiam identificar o entrevistado e, portanto, nem todos os dados coletados na pesquisa estarão disponíveis aqui
+  * Estados com menor incidência de resposta, como aqueles das regiões Norte, Nordeste e Centro-Oeste terão apenas sua região indicada no dataset (tambem como consequencia da anonimização)
+  * As perguntas cujas respostas são multi-valoradas ocupam mais de uma coluna no dataset
+  * Categorias foram convertidas para dummie
+
+Conferir quantidade de opcoes de resposta por pergunta que tenha mais de uma resposta (ordenado do maior para o menor):
+
+```{r}
+(
+  MORE_QUESTIONS <- 
+    dataset %>% 
+    colnames() %>%
+    str_extract("(p|d)[0-9]{1,}") %>% 
+    table() %>% 
+    .[.>1] %>% 
+    sort(decreasing = T)
+)
+```
+
+Tabela de perguntas de múltipla seleção com maior quantidade de respostas:
+
+```{r}
+dataset %>% 
+  select(str_which(colnames(dataset), paste0(names(MORE_QUESTIONS), collapse = "|"))) %>%
+  select_if(is.numeric) %>% 
+  map_df(sum) %>% 
+  gather() %>% 
+  arrange(-value) %>% 
+  separate(key, c("pergunta", "resposta"),  "_", extra = "merge") %>% 
+  kable2(width = NULL)
+```
+
+A definição de cada atributo pode ser conferida com mais detalhes em: <https://www.kaggle.com/datahackers/pesquisa-data-hackers-2019>
+
+Como o objetivo deste kernel é criar um modelo que calcule o salário de um cientista de dados de acordo com suas respostas na pesquisa, será realizada uma pré-seleção de atributos para previsão de salário, pois, não desejamos que o modelo faça distinção de salário por algumas razões como idade e genero.
+
+|  Indice | Pergunda | Seleção |
+|:--|:--|:--:|
+| P1 | Idade? [Mascarada] | <span style="color: red;">✗</span> |
+| P2 | Gênero? [Mascarada] | <span style="color: red;">✗</span>  |
+| P3 | Atualmente você vive no Brasil? | <span style="color: red;">✗</span>  |
+| P4 | Em que país você vive hoje? | <span style="color: red;">✗</span>  |
+| P5 | Em que estado você vive hoje? [Mascarada] | <span style="color: red;">✗</span>  |
+| P6 | Na questão anterior você disse que vive em. Esse é seu estado de origem (onde nasceu ou se formou)? | <span style="color: red;">✗</span>  |
+| P7 | Qual seu estado de origem? | <span style="color: red;">✗</span>  |
+| P8 | Qual seu nível de ensino? | <span style="color: green;">✔</span>  |
+| P9 | Qual sua área de formação? | <span style="color: green;">✔</span>  |
+| P10 | Qual sua situação atual de trabalho? | <span style="color: red;">✗</span>  |
+| P11 | A empresa em que você trabalha pertence a qual setor? | <span style="color: green;">✔</span>  |
+| P12 | A empresa em que você trabalha possui quantos funcionários atualmente? | <span style="color: green;">✔</span>  |
+| P13 | Você atua como gestor? | <span style="color: green;">✔</span>  |
+| P14 | Qual das opções abaixo definem melhor seu cargo de trabalho atual como gestor? | <span style="color: green;">✔</span>  |
+| P15 | Qual das opções abaixo definem melhor seu cargo de trabalho atual? | <span style="color: green;">✔</span>  |
+| P16 | Qual sua faixa salarial atual? [Mascarada] | <span style="color: green;">✔</span>  |
+| P17 | Quanto tempo de experiência na área de dados você tem? | <span style="color: green;">✔</span>  |
+| P18 | Quanto tempo de experiência na área de TI/Engenharia de Software você teve antes de começar a trabalhar na área de dados? | <span style="color: green;">✔</span>  |
+| P19 | Você se considera um profissional que atua na área de Data Science? | <span style="color: green;">✔</span>  |
+| P20 | Quais dos métodos listados abaixo você costuma utilizar no trabalho? | <span style="color: green;">✔</span>  |
+| P21 | Quais das linguagens de programação listadas abaixo você utiliza no trabalho? | <span style="color: green;">✔</span>  |
+| P22 | Entre as linguagens de programação listadas abaixo, qual é a que você mais utiliza no trabalho? [Mascarada] | <span style="color: green;">✔</span>  |
+| P23 | Quais das fontes de dados listadas você já analisou no trabalho? | <span style="color: green;">✔</span>  |
+| P24 | Entre as fontes de dados listadas, quais você utiliza na maior parte do tempo? Selecione no máximo duas opções que você mais utiliza. | <span style="color:  green;">✔</span> |
+| P25 | Quais das opções de Cloud listadas abaixo você utiliza no trabalho? | <span style="color: green;">✔</span>  |
+| P26 | Quais dos bancos de dados/fontes de dados listados abaixo você utiliza para consultar informações, e posteriormente analisar, no trabalho? | <span style="color:  green;">✔</span> |
+| P27 | Quais as Ferramentas de Business Intelligence você utiliza no trabalho? | <span style="color: green;">✔</span>  |
+| P28 | Quais as tecnologias são utilizadas como ferramenta de ETL no seu trabalho? | <span style="color: green;">✔</span>  |
+| P29 | Sua organização possui um Data Warehouse? | <span style="color: green;">✔</span>  |
+| P30 | Qual tecnologia utilizada como plataforma do Data Warehouse? | <span style="color: green;">✔</span>  |
+| P31 | Quais das iniciativas do Data Hackers que você já acessou/acompanhou? | <span style="color: red;">✗</span>  |
+| P32 | Entre as iniciativas do Data Hackers qual a sua preferida? | <span style="color: red;">✗</span>  |
+| P33 | De quais outras formas que você costuma se atualizar no mundo dos dados? | <span style="color: green;">✔</span>  |
+| P34 | Em quais dessas plataformas listadas abaixo você já iniciou/completou cursos na área de Data Science? | <span style="color: green;">✔</span>  |
+| P35 | Dentre as plataformas listadas abaixo qual foi a sua preferida para cursos de Data Science? | <span style="color: red;">✗</span>  |
+
+Além dessas, mais algumas outras colunas:
+
+|  Indice | Pergunda | Seleção |
+|:--|:--|:--:|
+|D1 | Macrorregião em que mora | <span style="color: red;">✗</span> |
+|D2 | Macrorregião em que nasceu | <span style="color: red;">✗</span> |
+|D3 | Área de formação anonimizada | <span style="color: red;">✗</span> |
+|D4 | Setor de mercado anonimizado | <span style="color: red;">✗</span> |
+|D5 | Nível de gerência anonimizado | <span style="color: red;">✗</span> |
+|D6 | Cargo anonimizado | <span style="color: red;">✗</span> |
+
+(A retirada dessas colunas é 'refletível')
+
+### Aplicar filtros
+
+Primeiramente, vamos conferir quem sao os individuos que nao declararam o salario:
+
+```{r}
+dataset %>% 
+  count(p10_job_situation, p16_salary_range) %>% 
+  filter(is.na(p16_salary_range)) %>% 
+  kable2(width = NULL)
+```
+
+Como não são pessoas que estão no mercado de trabalho, não utilizaremos estes registros para o treinamento do modelo
+
+```{r}
+dataset <- 
+  dataset %>% 
+  filter(p3_living_in_brasil == 1) %>% 
+  filter(!is.na(p16_salary_range)) %>% 
+  select(-p3_living_in_brasil)
+```
+
+Aplicando os filtros:
+
+```{r}
+dataset <- 
+  dataset %>% 
+  select(p8_degreee_level,
+         p12_workers_number:p30_teradata,
+         p33_telegram_groups:p34_other,
+         d3_anonymized_degree_area:d6_anonymized_role)
+```
+
+### Transformação na variável resposta
+
+```{r}
+# before fix y
+p1 <- 
+  plotly::ggplotly(
+    dataset %>% 
+      count(p16_salary_range) %>% 
+      ggplot(aes(x= p16_salary_range, y = n))+
+      geom_bar(stat = "identity") +
+      theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1))
+  )
+
+
+# Agregar salarios com menor frequencia
+dataset <- 
+  dataset %>% 
+  mutate(p16_salary_range = as.character(p16_salary_range),
+         p16_salary_range = ifelse(p16_salary_range == "de R$ 2.001/mês a R$ 3000/mês",
+                                   "de R$ 2.001/mês a R$ 3.000/mês", p16_salary_range),
+         p16_salary_range = 
+           factor(p16_salary_range, 
+                  levels = c("Menos de R$ 1.000/mês",
+                             "de R$ 1.001/mês a R$ 2.000/mês",
+                             "de R$ 2.001/mês a R$ 3.000/mês",
+                             "de R$ 3.001/mês a R$ 4.000/mês",
+                             "de R$ 4.001/mês a R$ 6.000/mês",
+                             "de R$ 6.001/mês a R$ 8.000/mês",
+                             "de R$ 8.001/mês a R$ 12.000/mês",
+                             "de R$ 12.001/mês a R$ 16.000/mês",
+                             "de R$ 16.001/mês a R$ 20.000/mês",
+                             "de R$ 20.001/mês a R$ 25.000/mês",
+                             "Acima de R$ 25.001/mês"))) 
+
+# after fix y
+p2 <- 
+  plotly::ggplotly(
+    dataset %>% 
+      count(p16_salary_range) %>% 
+      ggplot(aes(x= p16_salary_range, y = n))+
+      geom_bar(stat = "identity") +
+      theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1))
+  )
+
+plotly::subplot(p1, p2)
+```
+ 
+# Resumir/Analisar Dados
+
+Uma primeira impressão dos dados pode ser obtida com o pacote `DataExplorer`:
+
+```{r, eval = F}
+create_report(dataset, y = "p16_salary_range")
+```
+
+Algumas informações sobre os dados:
+
+```{r}
+introduce(dataset) %>% gather() %>% kable2()
+```
+
+De forma visual:
+
+```{r}
+plot_intro(dataset)
+```
+
+Na verdade a maioria de colunas do tipo *Continuous* ocorre porque as respostas de múltiplas escolhas foram transformadas em *dummie*
+
+## Limpeza dos dados
+
+Formato e limpeza
+
+### Estrutura dos dados
+
+Representação da estrutura dos dados:
+
+```{r}
+visdat::vis_dat(dataset)
+```
+
+### Dados ausentes
+
+Colunas com dados ausentes:
+
+```{r}
+plot_missing(dataset, missing_only = T)
+```
+
+A ação executada para os registros de NA será remover colunas `p29_have_data_warehouse`, `p22_most_used_proggraming_languages`,`d5_anonymized_manager_level`, `d6_anonymized_role`, `d4_anonymized_market_sector` e `d3_anonymized_degree_area` inteiras. Vamos supor que não sejam importante no ajuste desse modelo.
+
+Além disso vamos remover todas as linhas restantes com `NA` e avaliar o impacto no tamanho do dataset:
+
+```{r}
+nlim_antes <- nrow(dataset)
+
+dataset <- 
+  dataset %>%
+  select(-p29_have_data_warehouse, 
+         -p22_most_used_proggraming_languages, 
+         -d5_anonymized_manager_level, 
+         -d6_anonymized_role,
+         -d4_anonymized_market_sector,
+         -d3_anonymized_degree_area) %>%
+  na.omit()
+```
+
+Uma diminuição de apenas `r paste0(round(nrow(dataset) / nlim_antes * 100, 4), "%")` no numero de linhas do dataset
+
+### Colunas com baixa variabiliadde
+
+```{r}
+ncol_antes <- ncol(dataset)
+
+n_zeros <- dataset %>% map_dbl(~sum(.x == 0)/ nrow(dataset))
+n_zeros <- names(n_zeros[n_zeros > 0.9])
+
+col_zeros <- n_zeros %>% str_extract("(p|d)[0-9]{1,}") %>% unique()
+col_zeros <- colnames(dataset)[colnames(dataset) %>% str_which(paste0(col_zeros, collapse = "|"))]
+
+dataset$p20_datascience   <- dataset %>% select(starts_with("p20")) %>% apply(1, sum)
+dataset$p21_prog_language <- dataset %>% select(starts_with("p21")) %>% apply(1, sum)
+dataset$p25_cloud         <- dataset %>% select(starts_with("p25")) %>% apply(1, sum)
+dataset$p26_databases     <- dataset %>% select(starts_with("p26")) %>% apply(1, sum)
+dataset$p27_bi            <- dataset %>% select(starts_with("p27")) %>% apply(1, sum)
+dataset$p28_etl           <- dataset %>% select(starts_with("p28")) %>% apply(1, sum)
+# dataset$p33_comunity      <- dataset %>% select(starts_with("p33")) %>% apply(1, function(x){ifelse(sum(x)!=0, 1, 0)})
+dataset$p34_extra_study   <- dataset %>% select(starts_with("p34")) %>% apply(1, sum)
+
+dataset <- 
+  dataset %>% 
+  select(-one_of(colnames(dataset)[str_which(colnames(dataset), paste0(col_zeros, collapse = "|"))]))
+```
+
+Uma diminuição de `r abs(ncol(dataset) - ncol_antes)` colunas do dataset
+
+### Atributos ordinais
+
+```{r}
+dataset <- 
+  dataset %>% 
+  mutate(p8_degreee_level= 
+           case_when(p8_degreee_level == "Prefiro não informar" ~ 0,
+                     p8_degreee_level == "Não tenho graduação formal" ~ 0,
+                     p8_degreee_level == "Estudante de Graduação" ~ 1,
+                     p8_degreee_level == "Graduação/Bacharelado" ~ 2,
+                     p8_degreee_level == "Pós-graduação" ~ 3,
+                     p8_degreee_level == "Mestrado" ~ 3,
+                     p8_degreee_level == "Doutorado ou Phd" ~ 4,
+           ),
+         p12_workers_number = 
+           case_when(p12_workers_number == "de 1 a 5" ~ 1,
+                     p12_workers_number == "de 6 a 10" ~ 2,
+                     p12_workers_number == "de 11 a 50" ~ 3,
+                     p12_workers_number == "de 51 a 100" ~ 4,
+                     p12_workers_number == "de 101 a 500" ~ 5,
+                     p12_workers_number == "de 501 a 1000" ~ 6,
+                     p12_workers_number == "de 1001 a 3000" ~ 7,
+                     p12_workers_number == "Acima de 3000" ~ 8),
+         p17_time_experience_data_science = 
+           case_when(str_detect(p17_time_experience_data_science, "Não")~0,
+                     p17_time_experience_data_science == "Menos de 1 ano" ~ 1,
+                     p17_time_experience_data_science == "de 1 a 2 anos" ~ 2,
+                     p17_time_experience_data_science == "de 2 a 3 anos" ~ 3,
+                     p17_time_experience_data_science == "de 4 a 5 anos" ~ 4,
+                     p17_time_experience_data_science == "de 6 a 10 anos" ~ 5,
+                     p17_time_experience_data_science == "Mais de 10 anos" ~ 6),
+         p18_time_experience_before = 
+           case_when(str_detect(p18_time_experience_before, "Não")~0,
+                     p18_time_experience_before== "Menos de 1 ano"~1,
+                     p18_time_experience_before== "de 1 a 2 anos"~2,
+                     p18_time_experience_before== "de 2 a 3 anos"~3,
+                     p18_time_experience_before== "de 4 a 5 anos"~4,
+                     p18_time_experience_before== "de 6 a 10 anos"~5,
+                     p18_time_experience_before== "Mais de 10 anos"~6),
+         p16_salary_range = as.numeric(p16_salary_range)
+  ) %>% 
+  select(p16_salary_range, everything())
+```
+
+## Estatisticas descritivas
+
+```{r, fig.width = 12, fig.height=8}
+dataset %>% 
+  select_if(is.numeric) %>% 
+  GGally::ggpairs(upper = list(continuous = GGally::wrap("cor", method = "spearman")))
+```
+
+# Modelos
+
+## Separar dados de treino/validacao/teste
+
+```{r}
+set.seed(123)
+trainIndex <- sample(1:2, nrow(dataset), T, c(0.8, 0.2))
+ttrain <- dataset[trainIndex,]
+ttest <- dataset[-trainIndex,]
+```
+
+Parametros de controle do ajuste:
+
+```{r}
+trControl <- trainControl(method = "cv",
+                           number = 5)
+```
+
+## Baseline - Modelo de Regressão Linear Múltipla (Stepwise)
+
+```{r}
+model_lm = train(
+  p16_salary_range ~ .,
+  data = dataset,
+  method = "lmStepAIC", 
+  preProc = c("center", "scale", "YeoJohnson"),
+  trControl = trControl,
+  trace = F
+)
+
+results <- 
+  tibble(pred = predict(model_lm, newdata = ttest),
+         obs = ttest$p16_salary_range
+  )
+
+p1 <- 
+results %>% 
+  ggplot(aes(x = obs, y = pred))+
+  geom_point()+ 
+  geom_abline(intercept = 0)+
+  scale_x_continuous(limits = c(0, 12))+
+  scale_y_continuous(limits = c(0, 12))
+
+p2 <- 
+results %>% 
+  gather() %>% 
+  ggplot(aes(x = value, fill = key))+
+  geom_density(alpha = 0.2)
+
+p1 / p2
+```
+
+O R2 do modelo foi: `r round(caret::R2(results$pred, results$obs), 4)`
+
+## eXtreme Gradient Boosting - xgb Linear
+
+```{r}
+set.seed(123)
+
+model_xgb = train(
+  p16_salary_range ~ .,
+  data = dataset,
+  method = "xgbLinear", 
+  preProc = c("center", "scale", "YeoJohnson"),
+  trControl = trControl
+)
+
+results <- 
+  tibble(pred = predict(model_xgb, newdata = ttest),
+         obs = ttest$p16_salary_range
+  )
+
+p1 <- 
+results %>% 
+  ggplot(aes(x = obs, y = pred))+
+  geom_point()+ 
+  geom_abline(intercept = 0)+
+  scale_x_continuous(limits = c(0, 12))+
+  scale_y_continuous(limits = c(0, 12))
+
+p2 <- 
+results %>% 
+  gather() %>% 
+  ggplot(aes(x = value, fill = key))+
+  geom_density(alpha = 0.2)
+
+p1 / p2
+```
+
+O R2 do modelo foi: `r round(caret::R2(results$pred, results$obs), 4)`
+
+# Modelo Final
+
+Portanto, o modelo final selecionado será o `xgbLinear`
+
+Vejamos os atributos mais importantes segundo o modelo:
+
+```{r}
+varImp(model_xgb) %>% ggplot() %>% plotly::ggplotly()
+```
+
+Resultados interessantes... Existem muitos pontos para debate aqui então convido o leitor fazer uma interpretação e, se possivel, sugestões de melhorias para o modelo!
+
+# Próximos passos
+
+Possíveis próximos passos para melhorar o ajuste do modelo:
+
+  * Testar mais modelos
+  * Tunning dos modelos
+  * Refinar pré-processamento
